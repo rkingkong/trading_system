@@ -495,6 +495,27 @@ class ProductionAlpacaClient:
         # All retries exhausted
         raise AlpacaAPIError(f"Request failed after {self.max_retries + 1} attempts: {last_exception}")
     
+    def _parse_datetime(self, dt_str):
+        """Parse datetime string from Alpaca API with microsecond handling"""
+        if not dt_str:
+            return None
+        
+        # Remove Z and replace with +00:00
+        dt_str = dt_str.replace('Z', '+00:00')
+        
+        # Fix microseconds issue - Alpaca sometimes returns 4 digits instead of 6
+        import re
+        # Find microseconds pattern like .3386+00:00 and pad to 6 digits
+        pattern = r'\.(\d{1,5})\+'
+        match = re.search(pattern, dt_str)
+        if match:
+            microseconds = match.group(1)
+            # Pad to 6 digits
+            padded_microseconds = microseconds.ljust(6, '0')
+            dt_str = dt_str.replace(f'.{microseconds}+', f'.{padded_microseconds}+')
+        
+        return datetime.fromisoformat(dt_str)
+    
     # ========================================================================
     # ACCOUNT MANAGEMENT
     # ========================================================================
@@ -937,38 +958,20 @@ class ProductionAlpacaClient:
             self.logger.error(f"❌ Failed to replace order {order_id}: {e}")
             return None
     
-    def _parse_datetime(self, dt_str):
-            """Parse datetime string from Alpaca API with microsecond handling"""
-            if not dt_str:
-                return None
-            
-            # Remove Z and replace with +00:00
-            dt_str = dt_str.replace('Z', '+00:00')
-            
-            # Fix microseconds issue - Alpaca sometimes returns 4 digits instead of 6
-            import re
-            # Find microseconds pattern like .3386+00:00 and pad to 6 digits
-            pattern = r'\.(\d{1,5})\+'
-            match = re.search(pattern, dt_str)
-            if match:
-                microseconds = match.group(1)
-                # Pad to 6 digits
-                padded_microseconds = microseconds.ljust(6, '0')
-                dt_str = dt_str.replace(f'.{microseconds}+', f'.{padded_microseconds}+')
-            
-            return datetime.fromisoformat(dt_str)
+    def _parse_order_response(self, response: dict) -> Order:
+        """Parse order response from Alpaca API"""
         
         return Order(
             id=response['id'],
             client_order_id=response['client_order_id'],
-            created_at=parse_datetime(response['created_at']),
-            updated_at=parse_datetime(response['updated_at']),
-            submitted_at=parse_datetime(response['submitted_at']),
-            filled_at=parse_datetime(response.get('filled_at')),
-            expired_at=parse_datetime(response.get('expired_at')),
-            canceled_at=parse_datetime(response.get('canceled_at')),
-            failed_at=parse_datetime(response.get('failed_at')),
-            replaced_at=parse_datetime(response.get('replaced_at')),
+            created_at=self._parse_datetime(response['created_at']),
+            updated_at=self._parse_datetime(response['updated_at']),
+            submitted_at=self._parse_datetime(response['submitted_at']),
+            filled_at=self._parse_datetime(response.get('filled_at')),
+            expired_at=self._parse_datetime(response.get('expired_at')),
+            canceled_at=self._parse_datetime(response.get('canceled_at')),
+            failed_at=self._parse_datetime(response.get('failed_at')),
+            replaced_at=self._parse_datetime(response.get('replaced_at')),
             replaced_by=response.get('replaced_by'),
             replaces=response.get('replaces'),
             asset_id=response['asset_id'],

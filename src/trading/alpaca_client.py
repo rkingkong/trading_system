@@ -529,7 +529,7 @@ class ProductionAlpacaClient:
                     trading_blocked=response.get('trading_blocked', False),
                     transfers_blocked=response.get('transfers_blocked', False),
                     account_blocked=response.get('account_blocked', False),
-                    created_at=datetime.fromisoformat(response['created_at'].replace('Z', '+00:00')),
+                    created_at=self._parse_datetime(response['created_at']),
                     trade_suspended_by_user=response.get('trade_suspended_by_user', False),
                     multiplier=float(response.get('multiplier', 1)),
                     shorting_enabled=response.get('shorting_enabled', False),
@@ -937,14 +937,26 @@ class ProductionAlpacaClient:
             self.logger.error(f"❌ Failed to replace order {order_id}: {e}")
             return None
     
-    def _parse_order_response(self, response: dict) -> Order:
-        """Parse order response from API"""
-        
-        # Helper function to parse datetime
-        def parse_datetime(dt_str):
-            if dt_str:
-                return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-            return None
+    def _parse_datetime(self, dt_str):
+            """Parse datetime string from Alpaca API with microsecond handling"""
+            if not dt_str:
+                return None
+            
+            # Remove Z and replace with +00:00
+            dt_str = dt_str.replace('Z', '+00:00')
+            
+            # Fix microseconds issue - Alpaca sometimes returns 4 digits instead of 6
+            import re
+            # Find microseconds pattern like .3386+00:00 and pad to 6 digits
+            pattern = r'\.(\d{1,5})\+'
+            match = re.search(pattern, dt_str)
+            if match:
+                microseconds = match.group(1)
+                # Pad to 6 digits
+                padded_microseconds = microseconds.ljust(6, '0')
+                dt_str = dt_str.replace(f'.{microseconds}+', f'.{padded_microseconds}+')
+            
+            return datetime.fromisoformat(dt_str)
         
         return Order(
             id=response['id'],

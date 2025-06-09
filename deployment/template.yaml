@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Enterprise Trading System - Production Deployment
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+  
+  NotificationEmail:
+    Type: String
+    Default: rkong@armku.us
+    Description: Email for trading notifications
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.9
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        NOTIFICATION_EMAIL: !Ref NotificationEmail
+
+Resources:
+  # Main Trading Function
+  TradingSystemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub trading-system-${Environment}
+      CodeUri: src/
+      Handler: core.main_system.lambda_handler
+      ReservedConcurrencyLimit: 3
+      Environment:
+        Variables:
+          # Alpaca Configuration
+          ALPACA_API_KEY: PKTGTBUDLQ3V9XFHTBHA
+          ALPACA_SECRET_KEY: PSOdtqJ5PQAk7Up76ZPSHd1km5NDC9f74YHX6bvK
+          ALPACA_BASE_URL: https://paper-api.alpaca.markets
+          
+          # Market Data APIs
+          ALPHA_VANTAGE_KEY: W81PG6O5UI6Q720I
+          NEWSAPI_KEY: 7cbc465672f44938a3c7f3ad20809d9e
+          FINHUB_API_KEY: cp2mcd9r01qtd8fspcl0cp2mcd9r01qtd8fspclg
+          
+          # AWS Services
+          SNS_TOPIC_ARN: !Ref TradingAlertsTopicArn
+          SIGNALS_TABLE: !Ref TradingSignalsTable
+          PERFORMANCE_TABLE: !Ref PerformanceTable
+          PORTFOLIO_TABLE: !Ref PortfolioTable
+          
+          # System Configuration
+          TRADING_ENABLED: 'true'
+          EXTENDED_HOURS: 'TRUE'
+          LOG_LEVEL: INFO
+          CACHE_TTL: '300'
+          
+      Events:
+        # Scheduled Trading (Market Hours)
+        MarketHoursSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: 'cron(*/5 14-21 ? * MON-FRI *)'  # Every 5 min, 9:30AM-4:30PM ET
+            Input: '{"source": "scheduled_trading", "mode": "market_hours"}'
+        
+        # Pre-Market Analysis
+        PreMarketSchedule:
+          Type: Schedule  
+          Properties:
+            Schedule: 'cron(0 13 ? * MON-FRI *)'  # 8:00 AM ET
+            Input: '{"source": "scheduled_analysis", "mode": "pre_market"}'
+        
+        # Post-Market Summary
+        PostMarketSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: 'cron(30 21 ? * MON-FRI *)'  # 4:30 PM ET
+            Input: '{"source": "scheduled_summary", "mode": "post_market"}'
+        
+        # Weekly Analysis
+        WeeklySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: 'cron(0 19 ? * SAT *)'  # Saturday 2:00 PM ET
+            Input: '{"source": "scheduled_analysis", "mode": "weekly"}'
+            
+        # Health Check API
+        HealthCheckApi:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: get
+            
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TradingSignalsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PerformanceTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PortfolioTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt TradingAlertsTopic.TopicName
+        - CloudWatchPutMetricPolicy: {}
+        - CloudWatchLogsFullAccess
+      
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+
+  # DynamoDB Tables
+  TradingSignalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub trading-signals-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: signal_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: signal_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  PerformanceTable:
+    Type: AWS::DynamoDB::Table  
+    Properties:
+      TableName: !Sub trading-performance-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: metric_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: metric_type
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  PortfolioTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub trading-system-portfolio-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: portfolio_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: portfolio_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # SNS Topic for Alerts
+  TradingAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub trading-system-alerts-${Environment}
+      DisplayName: Trading System Alerts
+      
+  TradingAlertsTopicArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /trading-system/${Environment}/sns-topic-arn
+      Type: String
+      Value: !Ref TradingAlertsTopic
+
+  # Email Subscription
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref TradingAlertsTopic
+      Endpoint: !Ref NotificationEmail
+
+  # Dead Letter Queue
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub trading-system-dlq-${Environment}
+      MessageRetentionPeriod: 1209600  # 14 days
+      
+  # CloudWatch Dashboard
+  TradingSystemDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub TradingSystem-${Environment}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${TradingSystemFunction}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${TradingSystemFunction}"],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${TradingSystemFunction}"]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "us-east-1",
+                "title": "Lambda Performance"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  TradingSystemFunctionArn:
+    Description: Trading System Lambda Function ARN
+    Value: !GetAtt TradingSystemFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-function-arn
+      
+  TradingSystemApi:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+    
+  SNSTopicArn:
+    Description: SNS Topic ARN for alerts
+    Value: !Ref TradingAlertsTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-sns-topic

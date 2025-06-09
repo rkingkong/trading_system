@@ -1,0 +1,198 @@
+# Trading System Deployment Script for PowerShell
+# Run from your project root: professional-trading-system\trading_system
+
+param(
+    [string]$Action = "all"  # all, lambda, test, dashboard
+)
+
+# Configuration
+$FUNCTION_NAME = "trading-system-engine"
+$S3_BUCKET = "trading-dashboard-3465"
+$ZIP_NAME = "trading-system-deployment.zip"
+$REGION = "us-east-1"
+
+# Colors for output
+function Write-ColorOutput($ForegroundColor) {
+    $fc = $host.UI.RawUI.ForegroundColor
+    $host.UI.RawUI.ForegroundColor = $ForegroundColor
+    if ($args) {
+        Write-Output $args
+    }
+    $host.UI.RawUI.ForegroundColor = $fc
+}
+
+Write-Host "`n🚀 Trading System Deployment Script" -ForegroundColor Blue
+Write-Host "====================================" -ForegroundColor Blue
+
+# Function to deploy Lambda
+function Deploy-Lambda {
+    Write-Host "`n📦 Deploying Lambda Function..." -ForegroundColor Yellow
+    
+    # Clean up old files
+    if (Test-Path $ZIP_NAME) {
+        Remove-Item $ZIP_NAME -Force
+    }
+    
+    # Create deployment package
+    Write-Host "Creating deployment package..." -ForegroundColor Cyan
+    
+    # Create a clean deployment directory
+    $deployDir = "deployment_temp"
+    if (Test-Path $deployDir) {
+        Remove-Item $deployDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $deployDir | Out-Null
+    
+    # Copy required files
+    Copy-Item -Path "src" -Destination "$deployDir\" -Recurse
+    Copy-Item -Path "deployment\requirements.txt" -Destination "$deployDir\"
+    
+    # If you have real_lambda_function.py in root
+    if (Test-Path "real_lambda_function.py") {
+        Copy-Item -Path "real_lambda_function.py" -Destination "$deployDir\"
+    }
+    
+    # Create zip from deployment directory
+    Compress-Archive -Path "$deployDir\*" -DestinationPath $ZIP_NAME -Force
+    
+    # Clean up temp directory
+    Remove-Item $deployDir -Recurse -Force
+    
+    $zipSize = (Get-Item $ZIP_NAME).Length / 1MB
+    Write-Host "✅ Package created: $ZIP_NAME ($([math]::Round($zipSize, 2)) MB)" -ForegroundColor Green
+    
+    # Upload to S3
+    Write-Host "`nUploading to S3..." -ForegroundColor Cyan
+    aws s3 cp $ZIP_NAME s3://$S3_BUCKET/$ZIP_NAME
+    
+    # Update Lambda function
+    Write-Host "`nUpdating Lambda function..." -ForegroundColor Cyan
+    aws lambda update-function-code `
+        --function-name $FUNCTION_NAME `
+        --s3-bucket $S3_BUCKET `
+        --s3-key $ZIP_NAME `
+        --region $REGION
+    
+    # Update configuration
+    Write-Host "`nUpdating Lambda configuration..." -ForegroundColor Cyan
+    
+    # Set handler based on your structure
+    $handler = if (Test-Path "real_lambda_function.py") { 
+        "real_lambda_function.lambda_handler" 
+    } else { 
+        "src.core.main_system.lambda_handler" 
+    }
+    
+    aws lambda update-function-configuration `
+        --function-name $FUNCTION_NAME `
+        --handler $handler `
+        --timeout 300 `
+        --memory-size 512 `
+        --region $REGION
+    
+    Write-Host "✅ Lambda deployment complete!" -ForegroundColor Green
+}
+
+# Function to test Lambda
+function Test-Lambda {
+    Write-Host "`n🧪 Testing Lambda Function..." -ForegroundColor Yellow
+    
+    # Test payload
+    $testPayload = @{
+        path = "/health"
+        httpMethod = "GET"
+    } | ConvertTo-Json -Compress
+    
+    # Invoke Lambda
+    aws lambda invoke `
+        --function-name $FUNCTION_NAME `
+        --payload $testPayload `
+        --region $REGION `
+        response.json | Out-Null
+    
+    # Display results
+    Write-Host "`n📊 Test Results:" -ForegroundColor Green
+    $response = Get-Content response.json | ConvertFrom-Json
+    $response | ConvertTo-Json -Depth 10
+    
+    # Check if trading is enabled
+    if ($response.body) {
+        $body = $response.body | ConvertFrom-Json -ErrorAction SilentlyContinue
+        if ($body.trading_enabled) {
+            Write-Host "`n✅ Trading is ENABLED!" -ForegroundColor Green
+        } else {
+            Write-Host "`n⚠️  Trading is DISABLED" -ForegroundColor Yellow
+        }
+    }
+    
+    # Cleanup
+    Remove-Item response.json -ErrorAction SilentlyContinue
+}
+
+# Function to deploy dashboard
+function Deploy-Dashboard {
+    Write-Host "`n🌐 Deploying Dashboard..." -ForegroundColor Yellow
+    
+    $dashboardFiles = @(
+        "index.html",
+        "ml_trading_dashboard.html",
+        "aws-connection.js"
+    )
+    
+    foreach ($file in $dashboardFiles) {
+        if (Test-Path $file) {
+            Write-Host "Uploading $file..." -ForegroundColor Cyan
+            aws s3 cp $file s3://$S3_BUCKET/ --acl public-read
+        } else {
+            Write-Host "⚠️  $file not found" -ForegroundColor Yellow
+        }
+    }
+    
+    # Enable website hosting
+    Write-Host "`nEnabling website hosting..." -ForegroundColor Cyan
+    aws s3 website s3://$S3_BUCKET --index-document index.html
+    
+    Write-Host "✅ Dashboard deployed!" -ForegroundColor Green
+    Write-Host "URL: http://$S3_BUCKET.s3-website-$REGION.amazonaws.com" -ForegroundColor Cyan
+}
+
+# Function to show logs
+function Show-Logs {
+    Write-Host "`n📋 Recent Lambda Logs:" -ForegroundColor Yellow
+    aws logs tail /aws/lambda/$FUNCTION_NAME --since 5m --region $REGION
+}
+
+# Main execution
+switch ($Action) {
+    "all" {
+        Deploy-Lambda
+        Start-Sleep -Seconds 5  # Wait for Lambda to update
+        Test-Lambda
+        Deploy-Dashboard
+    }
+    "lambda" {
+        Deploy-Lambda
+        Start-Sleep -Seconds 5
+        Test-Lambda
+    }
+    "test" {
+        Test-Lambda
+    }
+    "dashboard" {
+        Deploy-Dashboard
+    }
+    "logs" {
+        Show-Logs
+    }
+    default {
+        Write-Host "Usage: .\deploy_trading_system.ps1 -Action [all|lambda|test|dashboard|logs]" -ForegroundColor Yellow
+    }
+}
+
+Write-Host "`n🎉 Deployment script completed!" -ForegroundColor Green
+Write-Host "`nUseful commands:" -ForegroundColor Cyan
+Write-Host "  View logs:     .\deploy_trading_system.ps1 -Action logs"
+Write-Host "  Test only:     .\deploy_trading_system.ps1 -Action test"
+Write-Host "  Lambda only:   .\deploy_trading_system.ps1 -Action lambda"
+Write-Host "  Dashboard:     .\deploy_trading_system.ps1 -Action dashboard"
+Write-Host "`nLambda Console: https://console.aws.amazon.com/lambda/home?region=$REGION#/functions/$FUNCTION_NAME" -ForegroundColor Blue

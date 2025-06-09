@@ -312,7 +312,11 @@ class ProductionAlpacaClient:
                 self.connected = True
                 self.last_heartbeat = datetime.now(timezone.utc)
                 
-                self.state_manager.update_component_health('alpaca_client', True)
+                try:
+                    from ..core.state_manager import ComponentState
+                except ImportError:
+                    from core.state_manager import ComponentState
+                self.state_manager.update_component_health('alpaca_client', ComponentState.HEALTHY)
                 
                 self.logger.info("✅ Alpaca connection established",
                                account_id=account_info.id,
@@ -325,7 +329,13 @@ class ProductionAlpacaClient:
                 
         except Exception as e:
             self.connected = False
-            self.state_manager.update_component_health('alpaca_client', False, str(e))
+            
+            try:
+                from ..core.state_manager import ComponentState
+            except ImportError:
+                from core.state_manager import ComponentState
+            self.state_manager.update_component_health('alpaca_client', ComponentState.FAILED, str(e))
+            
             self.logger.error(f"❌ Alpaca connection failed: {e}")
             return False
     
@@ -343,14 +353,25 @@ class ProductionAlpacaClient:
             
             if account:
                 self.last_heartbeat = datetime.now(timezone.utc)
-                self.state_manager.update_component_health('alpaca_client', True)
+                try:
+                    from ..core.state_manager import ComponentState
+                except ImportError:
+                    from core.state_manager import ComponentState
+                self.state_manager.update_component_health('alpaca_client', ComponentState.HEALTHY)
+                                
                 return True
             else:
                 self.state_manager.update_component_health('alpaca_client', False, "Health check failed")
                 return False
                 
         except Exception as e:
-            self.state_manager.update_component_health('alpaca_client', False, str(e))
+            
+            try:
+                from ..core.state_manager import ComponentState
+            except ImportError:
+                from core.state_manager import ComponentState
+            self.state_manager.update_component_health('alpaca_client', ComponentState.FAILED, str(e))
+            
             return False
     
     # ========================================================================
